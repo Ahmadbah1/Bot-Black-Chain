@@ -1,21 +1,61 @@
-name: Bot Intraday
+name: Bot Intraday 1H
 
 on:
+  # Lancement toutes les heures, à H+5 (après clôture de la bougie 1h)
   schedule:
-    - cron: '30 * * * *'  # Toutes les heures à la minute 30
+    - cron: '5 * * * *'
+  # Permet aussi un lancement manuel depuis l'onglet Actions
   workflow_dispatch:
+
+# Empêche deux runs simultanés de se marcher dessus sur le cache
+concurrency:
+  group: bot-intraday
+  cancel-in-progress: false
 
 jobs:
   run-bot:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      # 1) Récupération du code
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # 2) Installation de Python
+      - name: Setup Python
+        uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      - run: pip install -r requirements.txt
-      - name: Exécuter le bot Intraday
+          cache: 'pip'
+
+      # 3) Installation des dépendances
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install ccxt pandas numpy requests
+
+      # 4) Restauration du cache anti-spam (signals_cache.json)
+      - name: Restore signals cache
+        uses: actions/cache@v4
+        with:
+          path: signals_cache.json
+          # Clé unique par run → le restore-keys récupère la dernière version
+          key: signals-cache-${{ github.run_id }}
+          restore-keys: |
+            signals-cache-
+
+      # 5) Lancement du bot
+      - name: Run bot
         env:
           TELEGRAM_BOT_TOKEN_INTRADAY: ${{ secrets.TELEGRAM_BOT_TOKEN_INTRADAY }}
           TELEGRAM_CHAT_ID_INTRADAY: ${{ secrets.TELEGRAM_CHAT_ID_INTRADAY }}
         run: python bot_intraday.py
+
+      # 6) Sauvegarde du cache (même si le bot échoue partiellement)
+      - name: Save signals cache
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: signals_cache.json
+          key: signals-cache-${{ github.run_id }}
