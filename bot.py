@@ -7,7 +7,7 @@ import numpy as np
 from datetime import datetime
 
 # ==========================================
-# CONFIGURATION - BOT SWING (4H)
+# CONFIGURATION
 # ==========================================
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
 TELEGRAM_CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
@@ -55,7 +55,6 @@ def get_dynamic_altcoins(exchange, top_n=100):
         return []
 
     altcoins = []
-    # BTC n'est PAS exclu, on le garde pour l'analyser
     EXCLUDE = {
         'usdt', 'usdc', 'dai', 'fdusd', 'tusd', 'usde', 'pyusd', 'busd',
         'usd1', 'usdd', 'frax', 'lusd', 'gho', 'crvusd',
@@ -83,16 +82,17 @@ def fetch_ohlcv(exchange, symbol, timeframe, limit=200):
         return None
 
 def detect_pivots(df, window=5):
-    df['pivot_high'] = df['high'].rolling(window=window, center=True).max() == df['high']
-    df['pivot_low'] = df['low'].rolling(window=window, center=True).min() == df['low']
+    # ⚠️ CORRECTION : on calcule les pivots sur RS
+    df['pivot_high'] = df['RS'].rolling(window=window, center=True).max() == df['RS']
+    df['pivot_low'] = df['RS'].rolling(window=window, center=True).min() == df['RS']
     highs = df[df['pivot_high']].tail(2)
     lows = df[df['pivot_low']].tail(2)
     if len(highs) < 2 or len(lows) < 2:
         return None
     return {
-        'pH1': highs['high'].iloc[-1], 'pH2': highs['high'].iloc[-2],
+        'pH1': highs['RS'].iloc[-1], 'pH2': highs['RS'].iloc[-2],
         'pH1b': df.index.get_loc(highs.index[-1]), 'pH2b': df.index.get_loc(highs.index[-2]),
-        'pL1': lows['low'].iloc[-1], 'pL2': lows['low'].iloc[-2],
+        'pL1': lows['RS'].iloc[-1], 'pL2': lows['RS'].iloc[-2],
         'pL1b': df.index.get_loc(lows.index[-1]), 'pL2b': df.index.get_loc(lows.index[-2])
     }
 
@@ -100,10 +100,13 @@ def analyze_channel(df, pivot_data):
     if pivot_data is None: return None
     pH1, pH2, pH1b, pH2b = pivot_data['pH1'], pivot_data['pH2'], pivot_data['pH1b'], pivot_data['pH2b']
     pL1, pL2, pL1b, pL2b = pivot_data['pL1'], pivot_data['pL2'], pivot_data['pL1b'], pivot_data['pL2b']
+    
     current_idx = len(df) - 1
     current_close = df['RS'].iloc[-1]
+    
     bullChan = (pL1 > pL2) and (pH1 > pH2)
     bearChan = (pL1 < pL2) and (pH1 < pH2)
+    
     if bullChan:
         slope = (pL1 - pL2) / (pL1b - pL2b) if (pL1b - pL2b) != 0 else 0
         supNow = pL1 + slope * (current_idx - pL1b)
@@ -112,6 +115,7 @@ def analyze_channel(df, pivot_data):
             return {"dir": "SHORT", "type": "CASSÉ", "level": supNow, "status": "PREPARATION"}
         elif dist_to_sup < 0.02:
             return {"dir": "SHORT", "type": "SURVEILLANCE", "level": supNow, "status": "SURVEILLANCE"}
+            
     elif bearChan:
         slope = (pH1 - pH2) / (pH1b - pH2b) if (pH1b - pH2b) != 0 else 0
         resNow = pH1 + slope * (current_idx - pH1b)
@@ -120,18 +124,28 @@ def analyze_channel(df, pivot_data):
             return {"dir": "LONG", "type": "CASSÉ", "level": resNow, "status": "PREPARATION"}
         elif dist_to_res < 0.02:
             return {"dir": "LONG", "type": "SURVEILLANCE", "level": resNow, "status": "SURVEILLANCE"}
+            
     return None
 
 def calculate_levels(df, signal, pivot_data):
     entry_price = df['close'].iloc[-1]
     atr = df['high'].sub(df['low']).rolling(14).mean().iloc[-1]
+    
+    # ⚠️ CORRECTION : Conversion du niveau RS en prix réel
+    is_btc = 'close_btc' not in df.columns or df['close_btc'].iloc[-1] == df['close'].iloc[-1]
+    btc_price = df['close_btc'].iloc[-1] if not is_btc else 1
+    
+    level_price = signal['level'] * btc_price if not is_btc else signal['level']
+    pL1_price = pivot_data['pL1'] * btc_price if not is_btc else pivot_data['pL1']
+    pH1_price = pivot_data['pH1'] * btc_price if not is_btc else pivot_data['pH1']
+    
     if signal['dir'] == 'LONG':
-        sl_price = min(pivot_data['pL1'], signal['level']) - (atr * 0.5)
+        sl_price = min(pL1_price, level_price) - (atr * 0.5)
         risk = entry_price - sl_price
         tp1 = entry_price + (risk * RISK_REWARD_RATIO)
         tp2 = entry_price + (risk * RISK_REWARD_RATIO * 2)
     else:
-        sl_price = max(pivot_data['pH1'], signal['level']) + (atr * 0.5)
+        sl_price = max(pH1_price, level_price) + (atr * 0.5)
         risk = sl_price - entry_price
         tp1 = entry_price - (risk * RISK_REWARD_RATIO)
         tp2 = entry_price - (risk * RISK_REWARD_RATIO * 2)
@@ -142,7 +156,7 @@ def calculate_levels(df, signal, pivot_data):
 # ==========================================
 
 def run_bot():
-    print(f"Démarrage du bot Swing - {datetime.now()}")
+    print(f"Démarrage du bot - {datetime.now()}")
     exchange = ccxt.mexc()
     
     df_btc = fetch_ohlcv(exchange, 'BTC/USDT', TIMEFRAME_ANALYSE)
@@ -162,6 +176,7 @@ def run_bot():
     for symbol in dynamic_alts:
         df_alt = fetch_ohlcv(exchange, symbol, TIMEFRAME_ANALYSE)
         if df_alt is None: continue
+            
         try:
             ticker = exchange.fetch_ticker(symbol)
             if ticker['quoteVolume'] < MIN_VOLUME_24H_USDT: continue
@@ -169,12 +184,12 @@ def run_bot():
 
         df = pd.merge(df_alt, df_btc, on='timestamp', suffixes=('_alt', '_btc'))
         if len(df) < 50: continue
+        
         df.rename(columns={
-            'open_alt': 'open', 'high_alt': 'high', 'low_alt': 'low',
+            'open_alt': 'open', 'high_alt': 'high', 'low_alt': 'low', 
             'close_alt': 'close', 'volume_alt': 'volume'
         }, inplace=True)
         
-        # Correction BTC
         if symbol == 'BTC/USDT':
             df['RS'] = df['close']
         else:
@@ -185,17 +200,24 @@ def run_bot():
         
         if signal:
             if signal['status'] == 'PREPARATION':
-                dist = abs(df['close'].iloc[-1] - signal['level']) / df['close'].iloc[-1]
+                # ⚠️ CORRECTION : comparer RS avec RS
+                dist = abs(df['RS'].iloc[-1] - signal['level']) / df['RS'].iloc[-1]
                 if dist < TOLERANCE_RETEST:
                     entry, sl, tp1, tp2 = calculate_levels(df, signal, pivot_data)
                     setups_valides.append({
-                        'symbol': symbol, 'dir': signal['dir'], 'entry': entry,
+                        'symbol': symbol, 'dir': signal['dir'], 'entry': entry, 
                         'sl': sl, 'tp1': tp1, 'tp2': tp2
                     })
                 else:
-                    preparations.append({'symbol': symbol, 'dir': signal['dir'], 'level': signal['level']})
+                    # ⚠️ CORRECTION : afficher le prix converti
+                    is_btc = symbol == 'BTC/USDT'
+                    price_level = signal['level'] if is_btc else signal['level'] * df['close_btc'].iloc[-1]
+                    preparations.append({'symbol': symbol, 'dir': signal['dir'], 'level': price_level})
             elif signal['status'] == 'SURVEILLANCE':
-                surveillances.append({'symbol': symbol, 'dir': signal['dir'], 'level': signal['level']})
+                is_btc = symbol == 'BTC/USDT'
+                price_level = signal['level'] if is_btc else signal['level'] * df['close_btc'].iloc[-1]
+                surveillances.append({'symbol': symbol, 'dir': signal['dir'], 'level': price_level})
+                
         time.sleep(0.5)
 
     report = f"📊 *RAPPORT SWING (4H) ({datetime.now().strftime('%H:%M')})*\n"
@@ -226,7 +248,7 @@ def run_bot():
         report += "😴 *Marché calme.* Aucun canal intéressant détecté pour le moment."
 
     send_telegram_message(report)
-    print("Rapport Swing envoyé.")
+    print("Rapport envoyé avec succès.")
 
 if __name__ == "__main__":
     run_bot()
